@@ -1,0 +1,231 @@
+library(fgsea)
+library(data.table)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(RColorBrewer)
+
+fgsea_res <- fread("GSEA_Full_Results.csv")
+deg_results <- fread("Differential_Expression_Results.csv")
+
+gene_ranks <- deg_results$t
+names(gene_ranks) <- deg_results$Gene
+gene_ranks <- sort(gene_ranks, decreasing = TRUE)
+
+gmt_file <- "c2.cp.kegg_legacy.v2023.2.Hs.symbols.gmt"
+pathways <- gmtPathways(gmt_file)
+
+target_pathways <- c(
+  "KEGG_JAK_STAT_SIGNALING_PATHWAY",
+  "KEGG_CYTOKINE_CYTOKINE_RECEPTOR_INTERACTION",
+  "KEGG_IL_17_SIGNALING_PATHWAY",
+  "KEGG_TNF_SIGNALING_PATHWAY",
+  "KEGG_NF_KAPPA_B_SIGNALING_PATHWAY"
+)
+
+selected_pathways <- fgsea_res[pathway %in% target_pathways, ]
+
+pathway_names <- c(
+  "KEGG_JAK_STAT_SIGNALING_PATHWAY" = "JAK-STAT Signaling Pathway",
+  "KEGG_CYTOKINE_CYTOKINE_RECEPTOR_INTERACTION" = "Cytokine-Cytokine Receptor Interaction",
+  "KEGG_IL_17_SIGNALING_PATHWAY" = "IL-17 Signaling Pathway",
+  "KEGG_TNF_SIGNALING_PATHWAY" = "TNF Signaling Pathway",
+  "KEGG_NF_KAPPA_B_SIGNALING_PATHWAY" = "NF-\u03BAB Signaling Pathway"
+)
+
+bar_data <- selected_pathways[order(selected_pathways$NES), ]
+bar_data$DisplayName <- pathway_names[bar_data$pathway]
+bar_data$Significance <- ifelse(bar_data$padj < 0.001, "***",
+                                ifelse(bar_data$padj < 0.01, "**",
+                                       ifelse(bar_data$padj < 0.05, "*", "")))
+bar_data$Direction <- ifelse(bar_data$NES > 0, "Up in Keloid", "Down in Keloid")
+bar_data$Color <- ifelse(bar_data$NES > 0, "#E64B35", "#4DBBD5")
+
+bar_plot <- ggplot(bar_data, aes(x = reorder(DisplayName, NES), y = NES, fill = Direction)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_text(aes(label = Significance, y = NES + ifelse(NES > 0, 0.05, -0.05)), 
+            size = 5, color = "black") +
+  coord_flip() +
+  scale_fill_manual(values = c("Up in Keloid" = "#E64B35", "Down in Keloid" = "#4DBBD5")) +
+  labs(
+    title = "GSEA Enrichment Analysis: Keloid vs Normal",
+    subtitle = "Top 5 KEGG Pathways",
+    x = "",
+    y = "Normalized Enrichment Score (NES)",
+    fill = "Enrichment Direction"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    axis.text.y = element_text(size = 11, face = "bold"),
+    axis.text.x = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    legend.position = "top",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(20, 20, 20, 20)
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50", size = 0.8)
+
+calculate_running_score <- function(stats, pathway_genes) {
+  pathway_genes <- intersect(pathway_genes, names(stats))
+  if (length(pathway_genes) == 0) return(NULL)
+  
+  gene_pos <- match(pathway_genes, names(stats))
+  
+  n <- length(stats)
+  m <- length(gene_pos)
+  
+  stats_abs <- abs(stats)
+  stats_norm <- stats_abs / sum(stats_abs)
+  
+  indicator <- rep(0, n)
+  indicator[gene_pos] <- 1
+  
+  running_sum <- cumsum(indicator * stats_norm - (1 - indicator) * (1/(n-m)))
+  
+  return(list(
+    running_score = running_sum,
+    positions = 1:n,
+    genes = gene_pos
+  ))
+}
+
+create_enrichment_plot_base <- function(pathway_name, fgsea_result, stats, pathways_list, index) {
+  pathway_genes <- pathways_list[[pathway_name]]
+  
+  pathway_info <- fgsea_result[pathway == pathway_name, ]
+  
+  rs_result <- calculate_running_score(stats, pathway_genes)
+  
+  if (is.null(rs_result)) {
+    return(NULL)
+  }
+  
+  par(mar = c(4, 4, 3, 2), mgp = c(2.5, 0.8, 0))
+  
+  plot(rs_result$positions, rs_result$running_score, 
+       type = "l", col = "#3C5488", lwd = 2,
+       xlab = "Rank in Ordered Dataset",
+       ylab = "Enrichment Score (ES)",
+       main = pathway_names[pathway_name],
+       cex.main = 1, font.main = 1,
+       cex.lab = 0.9, cex.axis = 0.8)
+  
+  abline(h = 0, col = "gray50", lty = 2, lwd = 0.8)
+  
+  rug(rs_result$genes, col = "#E64B35", lwd = 1.5, side = 3, ticksize = 0.03)
+  
+  text(x = max(rs_result$positions) * 0.7, 
+       y = max(rs_result$running_score) * 0.8,
+       labels = sprintf("NES = %.2f\np.adjust = %.2e", 
+                        pathway_info$NES, pathway_info$padj),
+       cex = 0.9, adj = 0)
+  
+  box()
+  
+  return(recordPlot())
+}
+
+pdf("GSEA_Top5_Pathways_Enrichment_Plots_Base.pdf", width = 10, height = 12)
+par(mfrow = c(3, 2), oma = c(0, 0, 3, 0))
+
+plot_count <- 0
+for (i in 1:length(target_pathways)) {
+  pathway <- target_pathways[i]
+  if (pathway %in% selected_pathways$pathway) {
+    create_enrichment_plot_base(pathway, selected_pathways, gene_ranks, pathways, i)
+    plot_count <- plot_count + 1
+  }
+}
+
+while (plot_count < 5) {
+  plot.new()
+  plot_count <- plot_count + 1
+}
+
+mtext("GSEA Enrichment Plots: Keloid vs Normal", 
+      outer = TRUE, cex = 1.5, font = 2, line = 1)
+dev.off()
+
+pdf("GSEA_Top5_Pathways_Professional_Complete.pdf", width = 16, height = 14)
+
+layout(matrix(c(1,1,2,3,4,5,4,5), nrow = 4, ncol = 2, byrow = TRUE), 
+       heights = c(0.8, 1.2, 1.2, 1.2))
+
+par(mar = c(0, 0, 0, 0))
+plot.new()
+text(0.5, 0.5, "GSEA Analysis: Keloid vs Normal\nTop 5 KEGG Pathways", 
+     cex = 2, font = 2)
+
+par(mar = c(5, 12, 4, 4))
+bar_data_plot <- bar_data[order(bar_data$NES, decreasing = TRUE), ]
+
+barplot(bar_data_plot$NES, 
+        names.arg = bar_data_plot$DisplayName,
+        horiz = TRUE,
+        col = bar_data_plot$Color,
+        xlab = "Normalized Enrichment Score (NES)",
+        main = "Enrichment Summary",
+        cex.names = 0.8,
+        las = 1,
+        xlim = c(min(bar_data_plot$NES) - 0.2, max(bar_data_plot$NES) + 0.2))
+abline(v = 0, lty = 2, col = "gray50")
+
+for (i in 1:nrow(bar_data_plot)) {
+  text(x = bar_data_plot$NES[i] + ifelse(bar_data_plot$NES[i] > 0, 0.1, -0.1),
+       y = i,
+       labels = bar_data_plot$Significance[i],
+       cex = 1.2)
+}
+
+legend("topright", 
+       legend = c("Up in Keloid", "Down in Keloid"),
+       fill = c("#E64B35", "#4DBBD5"),
+       cex = 0.9,
+       bty = "n")
+
+for (i in 1:min(4, length(target_pathways))) {
+  if (i <= nrow(selected_pathways)) {
+    pathway <- selected_pathways$pathway[i]
+    pathway_genes <- pathways[[pathway]]
+    rs_result <- calculate_running_score(gene_ranks, pathway_genes)
+    
+    if (!is.null(rs_result)) {
+      par(mar = c(4, 4, 3, 2))
+      plot(rs_result$positions, rs_result$running_score, 
+           type = "l", col = "#3C5488", lwd = 2,
+           xlab = "Rank", ylab = "ES",
+           main = pathway_names[pathway],
+           cex.main = 0.9)
+      abline(h = 0, col = "gray50", lty = 2)
+      rug(rs_result$genes, col = "#E64B35", lwd = 1, side = 3, ticksize = 0.02)
+      
+      pathway_info <- selected_pathways[pathway == pathway, ]
+      text(x = max(rs_result$positions) * 0.7, 
+           y = max(rs_result$running_score) * 0.8,
+           labels = sprintf("NES = %.2f\np = %.2e", 
+                            pathway_info$NES, pathway_info$padj),
+           cex = 0.8, adj = 0)
+      box()
+    }
+  }
+}
+
+dev.off()
+
+png("GSEA_Top5_Pathways_Barplot.png", width = 12, height = 8, units = "in", res = 300)
+print(bar_plot)
+dev.off()
+
+table_data <- selected_pathways[, .(
+  Pathway = pathway_names[pathway],
+  NES = round(NES, 3),
+  `P-value` = format(pval, scientific = TRUE, digits = 3),
+  `Adjusted P-value` = format(padj, scientific = TRUE, digits = 3),
+  Size = size,
+  `Leading Edge` = sapply(leadingEdge, function(x) paste(head(x, 5), collapse = ", "))
+)]
+
+fwrite(table_data, "GSEA_Top5_Pathways_Results.csv")
