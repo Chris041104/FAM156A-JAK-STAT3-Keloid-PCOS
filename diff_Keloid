@@ -1,0 +1,135 @@
+library(limma)
+library(pheatmap)
+
+setwd("/Users/chris/Desktop/mass/幻想家 TCGA及GEO数据挖掘/60diff_Keloid")
+
+data <- read.table("GSE158395_exp_fin_geo.csv", header=TRUE, sep=",", check.names=FALSE, row.names=1)
+
+dimnames <- list(rownames(data), colnames(data))
+data_matrix <- matrix(as.numeric(as.matrix(data)), nrow=nrow(data), dimnames=dimnames)
+
+data_normalized <- normalizeBetweenArrays(data_matrix)
+
+gene_means <- rowMeans(data_normalized, na.rm = TRUE)
+gene_df <- data.frame(
+  gene_name = rownames(data_normalized),
+  mean_expression = gene_means,
+  stringsAsFactors = FALSE
+)
+gene_df <- gene_df[order(gene_df$gene_name, -gene_df$mean_expression), ]
+unique_genes <- gene_df[!duplicated(gene_df$gene_name), ]
+
+data_unique <- data_normalized[unique_genes$gene_name, ]
+rownames(data_unique) <- unique_genes$gene_name
+
+write.table(data.frame(ID=rownames(data_unique), data_unique), 
+            file="normalize_unique.txt", sep="\t", quote=FALSE, row.names=FALSE)
+
+Normal <- read.table("Normal.txt", header=FALSE, sep="\t", check.names=FALSE)
+Keloid <- read.table("Keloid.txt", header=FALSE, sep="\t", check.names=FALSE)
+
+NormalData <- data_unique[, as.character(Normal$V1)]
+KeloidData <- data_unique[, as.character(Keloid$V1)]
+combined_data <- cbind(NormalData, KeloidData)
+
+NormalNum <- ncol(NormalData)
+KeloidNum <- ncol(KeloidData)
+
+Type <- c(rep("Normal", NormalNum), rep("Keloid", KeloidNum))
+design <- model.matrix(~0+factor(Type))
+colnames(design) <- c("Normal", "Keloid")
+
+fit <- lmFit(combined_data, design)
+contrast.matrix <- makeContrasts(Keloid-Normal, levels=design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+allDiff <- topTable(fit2, adjust='fdr', number=200000)
+allDiffOut <- rbind(id=colnames(allDiff), allDiff)
+write.table(allDiffOut, file="all.gene.txt", sep="\t", quote=FALSE, col.names=FALSE)
+
+logFCfilter <- 1 
+P.Val.Filter <- 0.05
+
+diffSig <- allDiff[with(allDiff, (abs(logFC) > logFCfilter & P.Value < P.Val.Filter)), ]
+
+if(nrow(diffSig) > 0) {
+  up_genes <- diffSig[diffSig$logFC > logFCfilter, ]
+  down_genes <- diffSig[diffSig$logFC < -logFCfilter, ]
+  
+  write.table(diffSig, file="diff.all_genes.txt", sep="\t", quote=FALSE, col.names=NA)
+  
+  if(nrow(up_genes) > 0) {
+    write.table(up_genes, file="diff.up_genes.txt", sep="\t", quote=FALSE, col.names=NA)
+    up_exp <- combined_data[rownames(up_genes), ]
+    write.table(up_exp, file="diff.up_expression.txt", sep="\t", quote=FALSE, col.names=NA)
+  }
+  
+  if(nrow(down_genes) > 0) {
+    write.table(down_genes, file="diff.down_genes.txt", sep="\t", quote=FALSE, col.names=NA)
+    down_exp <- combined_data[rownames(down_genes), ]
+    write.table(down_exp, file="diff.down_expression.txt", sep="\t", quote=FALSE, col.names=NA)
+  }
+  
+  write.table(rownames(diffSig), file="diffGenename.txt", sep="\t", quote=FALSE, col.names=FALSE, row.names=FALSE)
+  
+  geneNum <- 50
+  diffSig <- diffSig[order(diffSig$logFC), ]
+  diffGeneName <- rownames(diffSig)
+  diffLength <- length(diffGeneName)
+  
+  if(diffLength > 0) {
+    hmGene <- c()
+    if(diffLength > (2*geneNum)) {
+      hmGene <- diffGeneName[c(1:geneNum, (diffLength-geneNum+1):diffLength)]
+    } else {
+      hmGene <- diffGeneName
+    }
+    
+    hmExp <- combined_data[hmGene, ]
+    Type_df <- data.frame(Type = c(rep("Normal", NormalNum), rep("Keloid", KeloidNum)))
+    rownames(Type_df) <- colnames(combined_data)
+    
+    pdf(file="heatmap.pdf", width=10, height=7.5)
+    pheatmap(hmExp, 
+             annotation_col = Type_df, 
+             color = colorRampPalette(c("#44B1C9", "white", "#DA4A35"))(50),
+             cluster_cols = FALSE,
+             show_colnames = FALSE,
+             scale="row",
+             fontsize = 8,
+             fontsize_row = 7,
+             fontsize_col = 8)
+    dev.off()
+  }
+}
+
+pdf(file="vol.pdf", width=5, height=5)
+xMax <- max(abs(allDiff$logFC), na.rm = TRUE) + 1
+yMax <- max(-log10(allDiff$P.Value), na.rm = TRUE) + 1
+
+plot(allDiff$logFC, -log10(allDiff$P.Value),
+     xlab="logFC", ylab="-log10(P.Value)",
+     main="Volcano", ylim=c(0, yMax), xlim=c(-xMax, xMax),
+     pch=20, cex=0.6, col="gray")
+
+up_genes_vol <- allDiff[allDiff$P.Value < P.Val.Filter & allDiff$logFC > logFCfilter, ]
+if(nrow(up_genes_vol) > 0) {
+  points(up_genes_vol$logFC, -log10(up_genes_vol$P.Value), pch=20, col="#E64B35", cex=1)
+}
+
+down_genes_vol <- allDiff[allDiff$P.Value < P.Val.Filter & allDiff$logFC < -logFCfilter, ]
+if(nrow(down_genes_vol) > 0) {
+  points(down_genes_vol$logFC, -log10(down_genes_vol$P.Value), pch=20, col="#4DBBD5", cex=1)
+}
+
+abline(v=c(-logFCfilter, logFCfilter), lty=2, col="gray")
+abline(h=-log10(P.Val.Filter), lty=2, col="gray")
+abline(v=0, lty=2, lwd=1)
+
+legend("topright", 
+       legend=c("Upregulated", "Downregulated", "Not significant"),
+       col=c("#E64B35", "#4DBBD5", "gray"),
+       pch=20, cex=0.8)
+
+dev.off()
