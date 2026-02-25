@@ -1,0 +1,107 @@
+library(limma)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+
+data <- read.table("normalize_unique.txt", header = TRUE, sep = "\t", row.names = 1)
+
+keloid_samples <- c("GSM4798868", "GSM4798869", "GSM4798871", "GSM4798878")
+normal_samples <- c("GSM4798872", "GSM4798874", "GSM4798875", "GSM4798876", "GSM4798877", "GSM4798880")
+
+target_genes <- c("ACOXL", "FAM156A", "MIR202HG")
+available_genes <- target_genes[target_genes %in% rownames(data)]
+
+if (length(available_genes) == 0) {
+  stop("None of the target genes found in the data.")
+}
+
+samples <- c(keloid_samples, normal_samples)
+groups <- c(rep("Keloid", length(keloid_samples)), rep("Normal", length(normal_samples)))
+design <- model.matrix(~0 + groups)
+colnames(design) <- c("Keloid", "Normal")
+
+expr_matrix <- as.matrix(data[, samples])
+
+fit <- lmFit(expr_matrix, design)
+contrast.matrix <- makeContrasts(KeloidvsNormal = Keloid - Normal, levels = design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+
+limma_results <- topTable(fit2, number = Inf, adjust.method = "BH")
+limma_results$Gene <- rownames(limma_results)
+
+target_limma <- limma_results[limma_results$Gene %in% available_genes, ]
+print(target_limma)
+
+plot_list <- list()
+
+for (gene in available_genes) {
+  keloid_data <- as.numeric(data[gene, keloid_samples])
+  normal_data <- as.numeric(data[gene, normal_samples])
+  
+  plot_data <- data.frame(
+    Expression = c(keloid_data, normal_data),
+    Group = c(rep("Keloid", length(keloid_data)), rep("Normal", length(normal_data))),
+    Gene = gene
+  )
+  
+  gene_pvalue <- limma_results[limma_results$Gene == gene, "P.Value"]
+  gene_logFC <- limma_results[limma_results$Gene == gene, "logFC"]
+  
+  sig_label <- ifelse(gene_pvalue > 0.05, "ns",
+               ifelse(gene_pvalue <= 0.001, "***",
+               ifelse(gene_pvalue <= 0.01, "**", "*")))
+  
+  p <- ggplot(plot_data, aes(x = Group, y = Expression, fill = Group)) +
+    geom_violin(trim = FALSE, alpha = 0.7) +
+    geom_boxplot(width = 0.1, fill = "white", alpha = 0.7) +
+    geom_jitter(width = 0.2, size = 1.5, alpha = 0.7) +
+    scale_fill_manual(values = c("Keloid" = "#F8766D", "Normal" = "#00BFC4")) +
+    labs(title = paste0(gene, "\nlogFC = ", round(gene_logFC, 3)),
+         x = "Group", y = "Expression Level") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+          axis.title = element_text(size = 11),
+          axis.text = element_text(size = 10),
+          legend.position = "none")
+  
+  y_max <- max(plot_data$Expression)
+  y_min <- min(plot_data$Expression)
+  y_position <- y_max + (y_max - y_min) * 0.15
+  
+  p <- p + geom_signif(comparisons = list(c("Keloid", "Normal")),
+                       annotations = sig_label,
+                       y_position = y_position,
+                       tip_length = 0.01,
+                       textsize = 5,
+                       vjust = 0.5)
+  
+  plot_list[[gene]] <- p
+}
+
+if (length(plot_list) == 1) {
+  print(plot_list[[1]])
+} else if (length(plot_list) > 1) {
+  final_plot <- ggarrange(plotlist = plot_list, ncol = min(3, length(plot_list)))
+  print(final_plot)
+}
+
+for (gene in available_genes) {
+  keloid_data <- as.numeric(data[gene, keloid_samples])
+  normal_data <- as.numeric(data[gene, normal_samples])
+  gene_result <- limma_results[limma_results$Gene == gene, ]
+  
+  cat("\nGene:", gene, "\n")
+  cat("Mean (Keloid):", round(mean(keloid_data), 3), "\n")
+  cat("Mean (Normal):", round(mean(normal_data), 3), "\n")
+  cat("logFC:", round(gene_result$logFC, 3), "\n")
+  cat("P-value:", format.pval(gene_result$P.Value, digits = 3), "\n")
+  cat("Adj.P.Val:", format.pval(gene_result$adj.P.Val, digits = 3), "\n")
+  cat("Significance:", ifelse(gene_result$P.Value > 0.05, "ns",
+                         ifelse(gene_result$P.Value <= 0.001, "***",
+                         ifelse(gene_result$P.Value <= 0.01, "**", "*"))), "\n")
+  cat("---\n")
+}
+
+write.csv(limma_results, "limma_differential_analysis_results.csv", row.names = FALSE)
+message("Results saved to: limma_differential_analysis_results.csv")
