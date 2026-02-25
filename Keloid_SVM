@@ -1,0 +1,266 @@
+library(e1071)
+library(caret)
+library(ggplot2)
+library(pROC)
+library(pheatmap)
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+library(randomForest)
+
+set.seed(123)
+setwd("/Users/chris/Desktop/Keloid/SVM")
+
+data <- read.table("normalize_unique.txt", header=TRUE, sep="\t", check.names=FALSE, row.names=1)
+data_matrix <- as.matrix(data)
+data_normalized <- normalizeBetweenArrays(data_matrix)
+
+Normal <- scan("Normal.txt", what=character(), quiet=TRUE)
+Keloid <- scan("Keloid.txt", what=character(), quiet=TRUE)
+
+conNum <- length(Normal)
+KeloidNum <- length(Keloid)
+Type <- as.factor(c(rep("Normal", conNum), rep("Keloid", KeloidNum)))
+
+data1 <- data_normalized[, Normal, drop=FALSE]
+data2 <- data_normalized[, Keloid, drop=FALSE]
+data_combined <- cbind(data1, data2)
+
+user_genes <- c("ACOXL", "BARX1", "MIR202HG", "FAM156A", 
+                "CHRNA7", "LINC00473", "SHISA3", "ZDHHC19")
+
+available_genes <- user_genes[user_genes %in% rownames(data_combined)]
+missing_genes <- setdiff(user_genes, available_genes)
+
+expression_means <- rowMeans(data_combined)
+threshold_value <- median(expression_means)
+data_filtered_all <- data_combined[expression_means > threshold_value, ]
+
+x_all <- t(data_filtered_all)
+y <- Type
+y <- factor(y, levels = c("Normal", "Keloid"))
+
+rf_for_importance <- randomForest(x = x_all, y = y, importance = TRUE, ntree = 500)
+importance_data <- importance(rf_for_importance, type = 1)
+importance_df_all <- data.frame(
+  Gene = rownames(importance_data),
+  Importance = importance_data[, 1],
+  Rank = 1:nrow(importance_data)
+)
+importance_df_all <- importance_df_all[order(-importance_df_all$Importance), ]
+
+importance_df_all$Is_User_Gene <- importance_df_all$Gene %in% user_genes
+
+write.table(importance_df_all, file="SVM_all_genes_importance.txt", sep="\t", 
+            quote=FALSE, row.names=FALSE)
+
+feature_numbers <- c(10, 20, 50, 100, 200, 500, 1000)
+cv_results_all <- data.frame()
+
+for (n_features in feature_numbers) {
+  if (n_features <= nrow(importance_df_all)) {
+    selected_genes <- importance_df_all$Gene[1:n_features]
+    x_selected <- x_all[, selected_genes, drop = FALSE]
+    
+    folds <- createFolds(y, k = 5)
+    accuracies <- numeric(5)
+    
+    for (fold in 1:5) {
+      test_idx <- folds[[fold]]
+      train_idx <- setdiff(1:nrow(x_selected), test_idx)
+      
+      train_data <- x_selected[train_idx, , drop = FALSE]
+      test_data <- x_selected[test_idx, , drop = FALSE]
+      
+      colnames(test_data) <- colnames(train_data)
+      
+      svm_model <- svm(x = train_data, 
+                       y = y[train_idx],
+                       type = "C-classification",
+                       kernel = "radial",
+                       probability = TRUE)
+      
+      pred <- predict(svm_model, test_data)
+      accuracies[fold] <- mean(pred == y[test_idx])
+    }
+    
+    cv_results_all <- rbind(cv_results_all, data.frame(
+      Number_of_Features = n_features,
+      Accuracy = mean(accuracies),
+      Accuracy_SD = sd(accuracies),
+      Features = paste(head(selected_genes, 5), collapse = ", ")
+    ))
+  }
+}
+
+write.table(cv_results_all, file="SVM_all_genes_CV_results.txt", sep="\t", 
+            quote=FALSE, row.names=FALSE)
+
+data_user <- data_combined[available_genes, , drop = FALSE]
+x_user <- t(data_user)
+
+feature_order <- colnames(x_user)
+
+folds <- createFolds(y, k = 5)
+accuracies_user <- numeric(5)
+conf_matrices <- list()
+
+for (fold in 1:5) {
+  test_idx <- folds[[fold]]
+  train_idx <- setdiff(1:nrow(x_user), test_idx)
+  
+  train_data <- x_user[train_idx, feature_order, drop = FALSE]
+  test_data <- x_user[test_idx, feature_order, drop = FALSE]
+  
+  svm_model <- svm(x = train_data, 
+                   y = y[train_idx],
+                   type = "C-classification",
+                   kernel = "radial",
+                   probability = TRUE)
+  
+  pred <- predict(svm_model, test_data)
+  accuracies_user[fold] <- mean(pred == y[test_idx])
+  
+  conf_matrices[[fold]] <- table(Predicted = pred, Actual = y[test_idx])
+}
+
+user_gene_performance <- data.frame(
+  Gene_Set = "User_Genes",
+  Number_of_Features = length(available_genes),
+  Accuracy = mean(accuracies_user),
+  Accuracy_SD = sd(accuracies_user),
+  Features = paste(available_genes, collapse = ", ")
+)
+
+pdf("SVM_all_genes_Accuracy_vs_Features.pdf", width=12, height=8)
+
+accuracy_plot <- ggplot(cv_results_all, aes(x = Number_of_Features, y = Accuracy)) +
+  geom_line(size = 1.2, color = "#2E86AB", alpha = 0.8) +
+  geom_point(size = 4, color = "#2E86AB", fill = "white", shape = 21, stroke = 2) +
+  geom_errorbar(aes(ymin = Accuracy - Accuracy_SD, ymax = Accuracy + Accuracy_SD), 
+                width = 0.1, color = "#2E86AB", alpha = 0.7) +
+  
+  geom_point(data = user_gene_performance, 
+             aes(x = Number_of_Features, y = Accuracy), 
+             size = 6, color = "red", shape = 18) +
+  geom_errorbar(data = user_gene_performance,
+                aes(ymin = Accuracy - Accuracy_SD, ymax = Accuracy + Accuracy_SD),
+                width = 0.1, color = "red", size = 1.2) +
+  annotate("text", x = user_gene_performance$Number_of_Features,
+           y = user_gene_performance$Accuracy + 0.05,
+           label = "User Genes", color = "red", size = 5, fontface = "bold") +
+  
+  labs(title = "SVM 5-Fold Cross-Validation Accuracy vs Number of Features",
+       subtitle = "Comparison between All Genes and User Provided Genes",
+       x = "Number of Features",
+       y = "5-Fold CV Accuracy") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 14, hjust = 0.5, color = "gray50"),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text = element_text(size = 12),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "gray80", fill = NA, size = 1)
+  ) +
+  scale_x_log10() +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent_format(accuracy = 1))
+
+print(accuracy_plot)
+dev.off()
+
+pdf("SVM_user_genes_ranking.pdf", width=10, height=8)
+
+user_genes_rank <- importance_df_all[importance_df_all$Is_User_Gene, ]
+user_genes_rank <- user_genes_rank[order(user_genes_rank$Rank), ]
+
+ranking_plot <- ggplot(user_genes_rank, aes(x = reorder(Gene, -Rank), y = Rank)) +
+  geom_bar(stat = "identity", fill = "#FF6B6B", alpha = 0.8) +
+  geom_text(aes(label = Rank), vjust = -0.5, size = 4, fontface = "bold") +
+  labs(title = "Ranking of User Genes in Full Genome Analysis",
+       subtitle = paste("Among", nrow(importance_df_all), "total genes"),
+       x = "User Gene",
+       y = "Importance Rank") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray50"),
+    axis.title = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_y_reverse()
+
+print(ranking_plot)
+dev.off()
+
+pdf("SVM_user_genes_importance.pdf", width=10, height=8)
+
+importance_plot <- ggplot(user_genes_rank, aes(x = reorder(Gene, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "#4ECDC4", alpha = 0.8) +
+  coord_flip() +
+  labs(title = "Importance of User Genes in Classification",
+       x = "Gene",
+       y = "Importance Score") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 12, face = "bold")
+  )
+
+print(importance_plot)
+dev.off()
+
+final_svm_user <- svm(x = x_user, y = y, 
+                      type = "C-classification",
+                      kernel = "radial",
+                      probability = TRUE)
+
+pdf("SVM_user_genes_ROC_curve.pdf", width=8, height=8)
+predictions <- predict(final_svm_user, newdata = x_user, probability = TRUE)
+probabilities <- attr(predictions, "probabilities")[, "Keloid"]
+roc_obj <- roc(y, probabilities)
+plot(roc_obj, main = paste("SVM ROC Curve - User Genes (AUC =", round(auc(roc_obj), 3), ")"),
+     col = "blue", lwd = 2)
+abline(a=0, b=1, lty=2, col="red")
+dev.off()
+
+pdf("SVM_user_genes_confusion_matrix.pdf", width=6, height=5)
+pred <- predict(final_svm_user, x_user)
+conf_matrix <- table(Predicted = pred, Actual = y)
+pheatmap(conf_matrix, 
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE,
+         display_numbers = TRUE,
+         number_format = "%d",
+         main = "SVM Confusion Matrix - User Genes",
+         color = colorRampPalette(c("white", "lightblue"))(20))
+dev.off()
+
+pdf("SVM_user_genes_heatmap.pdf", width=10, height=8)
+heatmap_data <- data_user
+annotation_col <- data.frame(Group = y)
+rownames(annotation_col) <- colnames(heatmap_data)
+
+pheatmap(heatmap_data,
+         scale = "row",
+         annotation_col = annotation_col,
+         show_colnames = FALSE,
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         main = "Expression Heatmap of User Genes",
+         fontsize_row = 10,
+         clustering_method = "complete")
+dev.off()
+
+saveRDS(final_svm_user, file = "svm_user_genes_model.rds")
+saveRDS(cv_results_all, file = "svm_all_genes_cv_results.rds")
+
+performance_comparison <- data.frame(
+  Analysis_Type = c("User_Genes", "Best_All_Genes"),
+  Number_of_Features = c(length(available_genes), cv_results_all$Number_of_Features[which.max(cv_results_all$Accuracy)]),
+  Accuracy = c(mean(accuracies_user), max(cv_results_all$Accuracy)),
+  AUC = c(round(auc(roc_obj), 4), NA)
+)
+
+write.table(performance_comparison, file="SVM_performance_comparison.txt", sep="\t", 
+            quote=FALSE, row.names=FALSE)
