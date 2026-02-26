@@ -1,0 +1,74 @@
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(ggplot2)
+library(stringi)
+library(GOplot)
+
+R.utils::setOption("clusterProfiler.download.method",'auto')
+
+setwd("/Users/chris/Desktop/Keloid/KEGG_GO Enrichment")
+
+input_diff = read.table("processed_genes_R.txt", sep="\t", header=T, check.names=F)
+input_gene <- input_diff[,1]
+input_gene = unique(as.vector(input_gene))
+
+entrezIDs = mget(input_gene, org.Hs.egSYMBOL2EG, ifnotfound=NA)
+entrezIDs = as.character(entrezIDs)
+gene = entrezIDs[entrezIDs != "NA"]
+gene = gsub("c\\(\"(\\d+)\".*", "\\1", gene)
+
+pvalueFilter = 0.05
+qvalueFilter = 1
+
+if(qvalueFilter > 0.05) {colorSel = "pvalue"} else {colorSel = "qvalue"}
+
+# GO富集分析
+kk = enrichGO(gene = gene, OrgDb = org.Hs.eg.db, pvalueCutoff = 1, 
+              qvalueCutoff = 1, ont = "all", readable = TRUE)
+GO = as.data.frame(kk)
+GO = GO[(GO$pvalue < pvalueFilter & GO$qvalue < qvalueFilter), ]
+
+write.table(GO, file = "GO.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+showNum = 10
+
+pdf(file = "GObarplot.pdf", width = 10, height = 7)
+bar = barplot(kk, drop = TRUE, showCategory = showNum, 
+              label_format = 130, split = "ONTOLOGY", color = colorSel) + 
+      facet_grid(ONTOLOGY ~ ., scale = 'free')
+print(bar)
+dev.off()
+
+pdf(file = "GObubble.pdf", width = 13, height = 7)
+bub = dotplot(kk, showCategory = showNum, orderBy = "GeneRatio", 
+              label_format = 75, split = "ONTOLOGY", color = colorSel) + 
+      facet_grid(ONTOLOGY ~ ., scale = 'free')
+print(bub)
+dev.off()
+
+barplot(kk)
+dotplot(kk)
+cnetplot(kk)
+emapplot(kk)
+heatplot(kk)
+
+# KEGG富集分析
+kk = enrichKEGG(gene = gene, organism = "hsa", pvalueCutoff = 1, qvalueCutoff = 1)
+KEGG = as.data.frame(kk)
+KEGG$geneID = as.character(sapply(KEGG$geneID, function(x) {
+  paste(input_gene[match(strsplit(x, "/")[[1]], as.character(entrezIDs))], collapse = "/")
+}))
+KEGG = KEGG[(KEGG$pvalue < pvalueFilter & KEGG$qvalue < qvalueFilter), ]
+
+write.table(KEGG, file = "KEGG.txt", sep = "\t", quote = FALSE, row.names = FALSE)
+
+showNum = 20
+
+pdf(file = "KEGGbarplot.pdf", width = 9, height = 7)
+barplot(kk, drop = TRUE, showCategory = showNum, label_format = 130, color = colorSel)
+dev.off()
+
+pdf(file = "KEGGbubble.pdf", width = 9, height = 7)
+dotplot(kk, showCategory = showNum, orderBy = "GeneRatio", label_format = 130, color = colorSel)
+dev.off()
